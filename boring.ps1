@@ -35,7 +35,10 @@ param(
 $ErrorActionPreference = 'Stop'
 $version = '0.1.0'
 $excluded = @(22, 25, 53, 111, 631) + $Exclude
-$sshOptions = @('-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3')
+# -n keeps ssh off the shared console's stdin, which can stall a second ssh.exe on Windows.
+$sshOptions = @('-n', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3')
+# A scan that takes longer than this is killed and retried, so it can't stall the loop.
+$scanTimeoutMs = 30000
 # Runs in the remote login shell: Linux ss, then Linux netstat, then BSD/macOS netstat.
 $listeners = 'ss -Hltn 2>/dev/null || netstat -ltn 2>/dev/null || netstat -an -p tcp'
 
@@ -45,8 +48,34 @@ function Write-Status([string]$Message) {
 
 # Returns the remote's forwardable listening ports, or $null if the host is unreachable.
 function Get-RemotePort {
-  $output = & ssh @sshOptions $HostName $listeners 2>$null
-  if ($LASTEXITCODE -ne 0) { return $null }
+  # A redirected child process rather than `& ssh`: it never touches the console, can be
+  # timed out, and its stderr can't become a terminating error under Windows PowerShell 5.1.
+  $quoted = @($sshOptions + $HostName + $listeners | ForEach-Object { '"' + $_ + '"' })
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo -Property @{
+    FileName               = 'ssh'
+    Arguments              = $quoted -join ' '
+    UseShellExecute        = $false
+    CreateNoWindow         = $true
+    RedirectStandardInput  = $true
+    RedirectStandardOutput = $true
+    RedirectStandardError  = $true
+  }
+  $process = [System.Diagnostics.Process]::Start($startInfo)
+  try {
+    $process.StandardInput.Close()
+    $stdout = $process.StandardOutput.ReadToEndAsync()
+    $null = $process.StandardError.ReadToEndAsync()
+    if (-not $process.WaitForExit($scanTimeoutMs)) {
+      $process.Kill()
+      return $null
+    }
+    $process.WaitForExit()
+    if ($process.ExitCode -ne 0) { return $null }
+    $output = $stdout.Result -split "`r?`n"
+  }
+  finally {
+    $process.Dispose()
+  }
 
   $ports = foreach ($line in $output) {
     if ($line -notmatch 'LISTEN') { continue }
@@ -69,7 +98,9 @@ function Get-LocalListeningPort {
 }
 
 function Open-Tunnel([int[]]$Ports) {
-  $arguments = $sshOptions + @('-N', '-o', 'ExitOnForwardFailure=yes')
+  # LogLevel=ERROR hides the "channel N: open failed" line ssh prints each time a local client
+  # reaches a forward whose remote server has stopped; the next scan drops that forward.
+  $arguments = $sshOptions + @('-N', '-o', 'ExitOnForwardFailure=yes', '-o', 'LogLevel=ERROR')
   foreach ($port in $Ports) { $arguments += @('-L', "${port}:localhost:$port") }
   $arguments += $HostName
 

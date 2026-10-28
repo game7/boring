@@ -45,7 +45,7 @@ if [[ $# -ne 1 ]]; then
 fi
 
 host=$1
-ssh_options=(-o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
+ssh_options=(-n -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -o ServerAliveCountMax=3)
 # Runs in the remote login shell: Linux ss, then Linux netstat, then BSD/macOS netstat.
 listeners='ss -Hltn 2>/dev/null || netstat -ltn 2>/dev/null || netstat -an -p tcp'
 tunnel_pid=
@@ -89,7 +89,7 @@ start_tunnel() {
   local arguments=() port
 
   for port in "$@"; do arguments+=(-L "$port:localhost:$port"); done
-  ssh "${ssh_options[@]}" -N -o ExitOnForwardFailure=yes "${arguments[@]}" "$host" &
+  ssh "${ssh_options[@]}" -N -o ExitOnForwardFailure=yes -o LogLevel=ERROR "${arguments[@]}" "$host" &
   tunnel_pid=$!
 }
 
